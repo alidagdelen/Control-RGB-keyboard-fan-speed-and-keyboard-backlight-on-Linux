@@ -20,7 +20,7 @@ Built with **Python** and **Textual**.
 ## 📸 Screenshot
 
 
-![TUF-Glow-RGB](assets/mainscreen.png)
+![TUF-Glow-RGB](screenshots/mainscreen.png)
 
 ---
 
