@@ -43,7 +43,16 @@ from textual.app import App, ComposeResult
 from textual.containers import Grid, Horizontal, Vertical
 from textual.message import Message
 from textual.reactive import reactive
-from textual.widgets import Button, Footer, Header, Input, Select, Static
+from textual.widgets import Button, Footer, Header, Input, Select, Static, TabbedContent, TabPane
+
+# --------------------------------------------------------------------------
+# Constants
+# --------------------------------------------------------------------------
+
+REFRESH_INTERVAL = 2.0
+SPINNER_INTERVAL = 0.1
+MAX_BRIGHTNESS = 3
+GITHUB_URL = "https://github.com/alidagdelen"
 
 # --------------------------------------------------------------------------
 # Logging & configuration
@@ -170,15 +179,11 @@ class OpenRGBBackend(KeyboardBackend):
             return False
 
     def set_brightness(self, level: int) -> bool:
-        # OpenRGB has no single universal brightness knob across devices,
-        # so brightness is not exposed through this backend.
         return False
 
 
 class GenericLedBackend(KeyboardBackend):
-    """Fallback for laptops with a plain (non-RGB) keyboard backlight
-    exposed through the standard Linux LED class. Covers many Dell, HP,
-    Lenovo and some Acer models. Brightness only - no color control."""
+    """Fallback for laptops with a plain (non-RGB) keyboard backlight."""
 
     name = "Generic LED class (brightness only)"
     supports_rgb = False
@@ -202,13 +207,11 @@ class GenericLedBackend(KeyboardBackend):
                 max_level = int(fh.read().strip())
         except (FileNotFoundError, ValueError):
             pass
-        scaled = round((level / 3) * max_level)
+        scaled = round((level / MAX_BRIGHTNESS) * max_level)
         return _write_sysfs(f"{self._path}/brightness", f"{scaled}\n")
 
 
 class NullBackend(KeyboardBackend):
-    """Used only when nothing else was detected, so the UI can still run."""
-
     name = "None detected"
     supports_rgb = False
 
@@ -234,24 +237,12 @@ def detect_backend() -> KeyboardBackend:
 # --------------------------------------------------------------------------
 # Fan control & thermal monitoring
 # --------------------------------------------------------------------------
-#
-# Fan speed is not exposed the same way across vendors, and most laptop
-# embedded controllers don't allow arbitrary manual RPM/PWM values safely.
-# The interface the mainline kernel actually standardizes across vendors
-# (asus-wmi, thinkpad_acpi, dell-laptop, ideapad-laptop, etc.) is the ACPI
-# "platform profile" - a named thermal/performance profile such as
-# low-power / balanced / performance. That's what this backend uses, so it
-# works the same way regardless of the laptop brand.
 
 PLATFORM_PROFILE_PATH = "/sys/firmware/acpi/platform_profile"
 PLATFORM_PROFILE_CHOICES_PATH = "/sys/firmware/acpi/platform_profile_choices"
 
 
 class FanBackend(ABC):
-    """Common interface for fan/thermal profile control."""
-
-    name: str = "Unknown"
-
     @abstractmethod
     def is_available(self) -> bool:
         ...
@@ -270,9 +261,6 @@ class FanBackend(ABC):
 
 
 class PlatformProfileBackend(FanBackend):
-    """Cross-vendor fan/thermal profile control via the kernel's ACPI
-    platform profile interface (kernel 5.20+)."""
-
     name = "ACPI Platform Profile"
 
     def is_available(self) -> bool:
@@ -299,8 +287,6 @@ class PlatformProfileBackend(FanBackend):
 
 
 class NullFanBackend(FanBackend):
-    """Used when no fan/thermal profile interface was found."""
-
     name = "None detected"
 
     def is_available(self) -> bool:
@@ -325,8 +311,6 @@ def detect_fan_backend() -> FanBackend:
 
 
 def read_cpu_temperature() -> Optional[float]:
-    """Best-effort CPU temperature reading via the standard Linux thermal
-    zone interface. Works across vendors; returns None if unavailable."""
     for zone_type_path in sorted(glob.glob("/sys/class/thermal/thermal_zone*/type")):
         try:
             with open(zone_type_path) as fh:
@@ -341,8 +325,6 @@ def read_cpu_temperature() -> Optional[float]:
 
 
 def read_fan_rpm() -> list[int]:
-    """Best-effort fan RPM reading via the standard Linux hwmon interface.
-    Returns an empty list if no fan sensor is exposed."""
     speeds: list[int] = []
     for fan_input_path in sorted(glob.glob("/sys/class/hwmon/hwmon*/fan*_input")):
         try:
@@ -354,7 +336,7 @@ def read_fan_rpm() -> list[int]:
 
 
 # --------------------------------------------------------------------------
-# Color presets
+# Color presets & widgets
 # --------------------------------------------------------------------------
 
 PRESET_COLORS: dict[str, tuple[str, tuple[int, int, int]]] = {
@@ -377,24 +359,11 @@ PRESET_COLORS: dict[str, tuple[str, tuple[int, int, int]]] = {
 }
 
 
-# --------------------------------------------------------------------------
-# Custom color-picker widgets
-# --------------------------------------------------------------------------
-
 def _rgb_style(r: int, g: int, b: int) -> str:
     return f"on rgb({r},{g},{b})"
 
 
 class HueBar(Static):
-    """A clickable horizontal strip covering the full hue spectrum (0-360)."""
-
-    DEFAULT_CSS = """
-    HueBar {
-        height: 1;
-        margin-bottom: 1;
-    }
-    """
-
     class HueChanged(Message):
         def __init__(self, hue: float) -> None:
             self.hue = hue
@@ -416,16 +385,6 @@ class HueBar(Static):
 
 
 class SaturationValueGrid(Static):
-    """A clickable rectangle for choosing saturation (x) and brightness (y)
-    for whatever hue is currently selected on the HueBar."""
-
-    DEFAULT_CSS = """
-    SaturationValueGrid {
-        height: 10;
-        margin-bottom: 1;
-    }
-    """
-
     hue: reactive[float] = reactive(0.0)
 
     class ColorPicked(Message):
@@ -459,13 +418,27 @@ class SaturationValueGrid(Static):
         self.post_message(self.ColorPicked(r, g, b))
 
 
+class FanDisplay(Static):
+    """Animated fan RPM indicator"""
+
+    rotation = reactive(0)
+
+    def render(self) -> str:
+        spinner = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
+        return f"Fan: {spinner[self.rotation % 10]} RPM"
+
+    def on_mount(self) -> None:
+        self.set_interval(SPINNER_INTERVAL, self._rotate)
+
+    def _rotate(self) -> None:
+        self.rotation += 1
+
+
 # --------------------------------------------------------------------------
 # Main application
 # --------------------------------------------------------------------------
 
 class GlowControlApp(App):
-    """RGB / backlight keyboard controller for Linux laptops."""
-
     TITLE = "Glow Control Center"
     SUB_TITLE = "RGB & Brightness Controller for Linux Laptops"
 
@@ -477,81 +450,124 @@ class GlowControlApp(App):
 
     CSS = """
     Screen {
-        align: center middle;
-        background: #0f172a;
+        background: $surface;
+        color: $text;
     }
-
+    
+    Header {
+        background: #1a1f2e;
+        color: #6366f1;
+        text-style: bold;
+        height: 2;
+    }
+    
     #main-container {
-        width: 76;
-        height: auto;
-        border: solid #38bdf8;
-        background: #1e293b;
+        background: #0f1419;
+        border: solid #6366f1;
         padding: 1 2;
-        border-title-align: center;
+        height: 1fr;
     }
-
-    #preview {
-        height: 3;
-        content-align: center middle;
-        color: #0f172a;
-        background: white;
-        margin-bottom: 1;
-        text-style: bold;
-        border: inner #64748b;
+    
+    #tabs {
+        height: 1fr;
     }
-
-    #backend-status {
-        color: #94a3b8;
-        margin-bottom: 1;
-        text-align: center;
+    
+    TabPane {
+        padding: 2 3;
     }
-
-    #fan-status {
-        color: #94a3b8;
-        margin-bottom: 1;
-        text-align: center;
-    }
-
+    
     .section-title {
+        color: #818cf8;
         text-style: bold;
-        color: #38bdf8;
-        margin-top: 1;
-        margin-bottom: 0;
+        margin: 1 0;
     }
-
+    
+    #preview {
+        height: 5;
+        border: round #6366f1;
+        text-align: center;
+        text-style: bold;
+        color: #ffffff;
+        margin-bottom: 2;
+    }
+    
+    #backend-status {
+        color: #10b981;
+        text-style: italic;
+        margin-bottom: 2;
+    }
+    
     #button-grid {
-        grid-size: 4;
-        grid-gutter: 1;
-        height: auto;
+        grid-size: 3 4;
+        height: 14;
+        border: solid #6366f1;
+        padding: 1;
+        margin-bottom: 2;
+    }
+    
+    #hue-bar {
+        height: 4;
+        border: solid #6366f1;
         margin-bottom: 1;
     }
-
-    Button {
-        width: 100%;
-        min-width: 3;
-        background: #334155;
-        color: #f8fafc;
-        border: none;
+    
+    #sv-grid {
+        height: 12;
+        border: solid #6366f1;
+        margin-bottom: 2;
     }
-
+    
+    Button {
+        background: #4f46e5;
+        color: #ffffff;
+        border: none;
+        margin: 0 1;
+    }
+    
     Button:hover {
-        background: #475569;
+        background: #6366f1;
+    }
+    
+    Button.warning {
+        background: #f59e0b;
+    }
+    
+    Input {
+        border: solid #6366f1;
+        background: #0f1419;
+        color: #ffffff;
+        margin-bottom: 1;
+    }
+    
+    Select {
+        border: solid #6366f1;
+        margin-bottom: 1;
+    }
+    
+    #fan-status {
+        color: #06b6d4;
+        text-style: italic;
+        border-left: solid #06b6d4;
+        padding-left: 1;
+        margin-bottom: 2;
+    }
+    
+    #fan-display {
+        height: 4;
+        border: solid #06b6d4;
+        text-align: center;
+        color: #06b6d4;
         text-style: bold;
     }
-
-    Input {
-        background: #334155;
-        border: solid #64748b;
+    
+    #about-info {
+        border: solid #6366f1;
+        padding: 1 2;
         color: white;
-        margin-bottom: 1;
+        height: auto;
+        margin-bottom: 2;
     }
-
-    Select {
-        background: #334155;
-        border: solid #64748b;
-        margin-bottom: 1;
-    }
-
+    
     Footer {
         background: #0f172a;
         color: #64748b;
@@ -568,50 +584,87 @@ class GlowControlApp(App):
         yield Header(show_clock=True)
 
         with Vertical(id="main-container") as container:
-            container.border_title = " Keyboard Lighting "
+            container.border_title = " Glow Control "
+            
+            with TabbedContent(id="tabs"):
+                # ========== LIGHTING TAB ==========
+                with TabPane("🎨 Lighting", id="lighting-tab"):
+                    yield Static(self.config_data["color"], id="preview")
+                    yield Static(self._backend_status_text(), id="backend-status")
 
-            yield Static(self.config_data["color"], id="preview")
-            yield Static(self._backend_status_text(), id="backend-status")
+                    yield Static("📌 Preset Colors", classes="section-title")
+                    with Grid(id="button-grid"):
+                        for key, (name, _) in PRESET_COLORS.items():
+                            yield Button(name, id=f"preset-{key}")
 
-            yield Static("Preset Colors", classes="section-title")
-            with Grid(id="button-grid"):
-                for key, (name, _) in PRESET_COLORS.items():
-                    yield Button(name, id=f"preset-{key}")
+                    yield Static("🎨 Custom Color Picker", classes="section-title")
+                    yield HueBar(id="hue-bar")
+                    yield SaturationValueGrid(id="sv-grid")
 
-            yield Static("Custom Color Picker (click to pick)", classes="section-title")
-            yield HueBar(id="hue-bar")
-            yield SaturationValueGrid(id="sv-grid")
+                    yield Static("💾 Or enter HEX color", classes="section-title")
+                    yield Input(placeholder="#FFFFFF", id="custom-color-input")
 
-            yield Static("Or enter a HEX color directly", classes="section-title")
-            yield Input(placeholder="#FFFFFF", id="custom-color-input")
+                    yield Static("💡 Brightness Level", classes="section-title")
+                    yield Select(
+                        options=[
+                            ("Off (0)", "0"),
+                            ("Low (1)", "1"),
+                            ("Medium (2)", "2"),
+                            ("Maximum (3)", "3"),
+                        ],
+                        value=self.config_data["brightness"],
+                        id="brightness-select",
+                    )
 
-            yield Static("Keyboard Brightness Level", classes="section-title")
-            yield Select(
-                options=[
-                    ("Off (0)", "0"),
-                    ("Low (1)", "1"),
-                    ("Medium (2)", "2"),
-                    ("Maximum (3)", "3"),
-                ],
-                value=self.config_data["brightness"],
-                id="brightness-select",
-            )
+                # ========== FAN CONTROL TAB ==========
+                with TabPane("❄️ Fan Control", id="fan-tab"):
+                    yield Static("🌡️ System Temperature & Fans", classes="section-title")
+                    yield Static(self._fan_status_text(), id="fan-status")
+                    
+                    yield Static("")
+                    
+                    yield Static("💨 Fan Animation", classes="section-title")
+                    yield FanDisplay(id="fan-display")
+                    
+                    yield Static("")
+                    
+                    yield Static("⚙️ Fan Profile", classes="section-title")
+                    fan_profiles = self.fan_backend.get_profiles()
+                    if fan_profiles:
+                        current = self.fan_backend.get_current_profile() or fan_profiles[0]
+                        yield Select(
+                            options=[(profile.replace("-", " ").title(), profile) for profile in fan_profiles],
+                            value=current,
+                            id="fan-profile-select",
+                        )
+                    else:
+                        yield Static(
+                            "ℹ️ No fan profile interface detected.",
+                            id="fan-profile-unavailable",
+                        )
 
-            yield Static("Fan & Thermal", classes="section-title")
-            yield Static(self._fan_status_text(), id="fan-status")
-            fan_profiles = self.fan_backend.get_profiles()
-            if fan_profiles:
-                current = self.fan_backend.get_current_profile() or fan_profiles[0]
-                yield Select(
-                    options=[(profile.replace("-", " ").title(), profile) for profile in fan_profiles],
-                    value=current,
-                    id="fan-profile-select",
-                )
-            else:
-                yield Static(
-                    "No fan profile interface detected on this device.",
-                    id="fan-profile-unavailable",
-                )
+                # ========== SETTINGS TAB ==========
+                with TabPane("⚙️ Settings", id="settings-tab"):
+                    yield Static("📋 Device Information", classes="section-title")
+                    yield Static(self._backend_status_text(), id="backend-status-settings")
+                    yield Static(f"Config: {CONFIG_FILE}", id="config-info")
+                    
+                    yield Static("")
+                    yield Static("🔧 Advanced Options", classes="section-title")
+                    yield Button("Reset to Defaults", id="reset-button", variant="warning")
+                    yield Button("Open Config File", id="open-config-button")
+
+                # ========== ABOUT TAB ==========
+                with TabPane("ℹ️ About", id="about-tab"):
+                    yield Static("Glow Control Center", classes="section-title")
+                    yield Static(
+                        "RGB and backlit keyboard controller for Linux laptops.\n"
+                        "Originally written for ASUS TUF series, now supports OpenRGB and generic LED.\n\n"
+                        "Author: Dağdelen\n"
+                        "License: MIT (c) 2026",
+                        id="about-info"
+                    )
+                    yield Button("Open GitHub Repository", id="open-github-button")
 
         yield Footer()
 
@@ -623,7 +676,7 @@ class GlowControlApp(App):
         saved_profile = self.config_data.get("fan_profile")
         if saved_profile and saved_profile in self.fan_backend.get_profiles():
             self.fan_backend.set_profile(saved_profile)
-        self.set_interval(2.0, self._refresh_fan_status)
+        self.set_interval(REFRESH_INTERVAL, self._refresh_fan_status)
 
     def _backend_status_text(self) -> str:
         if isinstance(self.backend, NullBackend):
@@ -669,12 +722,28 @@ class GlowControlApp(App):
     # -- Event handlers -----------------------------------------------------
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
-        if not event.button.id or not event.button.id.startswith("preset-"):
+        if not event.button.id:
             return
-        key = event.button.id.removeprefix("preset-")
-        _, (r, g, b) = PRESET_COLORS[key]
-        self.color_hex = f"#{r:02X}{g:02X}{b:02X}"
-        self.apply_system_color(r, g, b)
+
+        if event.button.id.startswith("preset-"):
+            key = event.button.id.removeprefix("preset-")
+            _, (r, g, b) = PRESET_COLORS[key]
+            self.color_hex = f"#{r:02X}{g:02X}{b:02X}"
+            self.apply_system_color(r, g, b)
+        
+        elif event.button.id == "reset-button":
+            self.config_data = dict(DEFAULT_CONFIG)
+            save_config(self.config_data)
+            self.notify("✓ Settings reset to defaults!")
+
+        elif event.button.id == "open-github-button":
+            subprocess.run(
+                ["xdg-open", GITHUB_URL],
+                check=False,
+            )       
+
+        elif event.button.id == "open-config-button":
+            subprocess.run(["xdg-open", str(CONFIG_FILE)])
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
         hex_code = event.value.strip().lstrip("#")
@@ -713,11 +782,13 @@ class GlowControlApp(App):
             if not event.value:
                 return
             profile = str(event.value)
-            self.fan_backend.set_profile(profile)
-            self.config_data["fan_profile"] = profile
-            save_config(self.config_data)
-
-    # -- Hardware application ------------------------------------------------
+            success = self.fan_backend.set_profile(profile)
+            if success:
+                self.config_data["fan_profile"] = profile
+                save_config(self.config_data)
+                self.notify(f"✓ Fan profile: {profile}")
+            else:
+                self.notify("✗ Failed to set fan profile - check permissions", severity="error")
 
     def apply_system_color(self, r: int, g: int, b: int, persist: bool = True) -> None:
         if self.backend.supports_rgb:
@@ -728,24 +799,23 @@ class GlowControlApp(App):
 
 
 def _relaunch_with_privileges() -> None:
-    """Re-run this script as root via pkexec, since writing to sysfs
-    generally requires elevated privileges."""
     print("[*] Root privileges are required to control the keyboard backlight.")
     print("[*] Requesting authentication via pkexec...")
     script_path = os.path.abspath(__file__)
-    cmd = ["pkexec", sys.executable, script_path, *sys.argv[1:]]
-    try:
-        subprocess.run(cmd, check=True)
-    except subprocess.CalledProcessError:
-        print("[-] Authentication failed or was cancelled.")
-    except FileNotFoundError:
-        print("[-] 'pkexec' was not found. Install polkit or run this script with sudo instead.")
+    
+    # Try pkexec first, fallback to sudo
+    for cmd_prefix in (["pkexec"], ["sudo"]):
+        cmd = [*cmd_prefix, sys.executable, script_path, *sys.argv[1:]]
+        try:
+            subprocess.run(cmd, check=True)
+            return
+        except (subprocess.CalledProcessError, FileNotFoundError):
+            continue
+    
+    print("[-] Authentication failed or was cancelled.")
 
 
 def apply_saved_settings() -> None:
-    """Re-apply the last saved color/brightness/fan profile without
-    opening the UI. Useful for an autostart entry that restores lighting
-    and fan behavior right after boot or login."""
     config_data = load_config()
     keyboard = detect_backend()
     fan = detect_fan_backend()
