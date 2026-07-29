@@ -1,154 +1,170 @@
-# global-Glow-RGB 🌈
+# Glow Control Center
 
-A lightweight Terminal User Interface (TUI) for controlling the RGB keyboard backlight, brightness and fan/thermal profile on Linux laptops.
+RGB and backlit keyboard controller for Linux laptops.
 
-Originally built for ASUS TUF Gaming laptops, it now auto-detects the best available backend so it also works on other vendors (e.g. Acer Predator/Nitro via OpenRGB, and generic brightness-only backlights on many Dell/HP/Lenovo models).
+## Overview
 
-Built with **Python** and **Textual**.
+Glow Control Center is a terminal-based application that provides unified control over RGB and backlit keyboards on Linux laptops. Originally developed for ASUS TUF series, it now supports multiple hardware backends and gracefully falls back to generic LED control when specialized drivers aren't available.
 
----
+## Features
 
-## ✨ Features
+- RGB color control with visual color picker
+- Brightness adjustment (0-3 levels)
+- Hardware backend detection and auto-selection
+- System temperature monitoring
+- Fan RPM reading
+- ACPI platform profile (fan mode) control
+- Configuration persistence
+- Preset color library
+- Runs on multiple laptop manufacturers
 
-- 🎨 16 preset RGB colors
-- 🖱️ Full HSV color picker — click a hue, then click anywhere in the grid for the exact shade
-- 🌈 Custom HEX color input
-- 💡 Keyboard brightness control
-- 🌀 Fan/thermal profile control (Quiet / Balanced / Performance) — cross-vendor via the kernel's ACPI platform-profile interface
-- 🌡️ Live CPU temperature & fan RPM readout
-- 💾 Remembers your last color, brightness and fan profile between launches
-- ⚙️ Headless `--apply` mode to restore settings on boot/login without opening the UI
-- 🖥️ Modern terminal interface
-- 🔒 Automatic privilege request with `pkexec`
-- 🐧 Native Linux support, multi-vendor hardware detection
+## Supported Hardware
 
----
+### Primary Backends
 
-## 📸 Screenshot
+1. **ASUS (native asus-nb-wmi)**
+   - Full RGB support
+   - Works on ASUS TUF, ROG, and recent ASUS models
+   - No external dependencies
 
-![TUF-Glow-RGB](screenshots/mainscreen.png)
+2. **OpenRGB**
+   - Generic RGB support via OpenRGB daemon
+   - Compatible with: Acer Predator/Nitro (ITE8291), Clevo, MSI, and more
+   - Requires: openrgb CLI and daemon running
 
----
+3. **Generic LED (brightness-only)**
+   - Fallback for laptops with standard keyboard backlight
+   - Works on Dell, HP, Lenovo, some Acer models
+   - No color control, brightness only
 
-## 📋 Requirements
+## Installation
 
-- Linux
+### Requirements
+
 - Python 3.10+
-- `pkexec`
-- `textual` (pulls in `rich` automatically)
-- Optional: [`openrgb`](https://openrgb.org) installed for non-ASUS RGB keyboards
+- textual library
+- rich library
+- Linux kernel with backlight support
+- Root/sudo privileges for hardware control
 
----
-
-## 🚀 Installation
-
-Clone the repository:
-```bash
-git clone https://github.com/alidagdelen/tuf-glow-rgb.git
-cd tuf-glow-rgb
-```
-
-Create a virtual environment (recommended):
-```bash
-python3 -m venv .venv
-source .venv/bin/activate
-```
-
-Install dependencies:
-```bash
-pip install -r requirements.txt
-```
-
-Run the application:
-```bash
-python3 main.py
-```
-
-The app re-launches itself with `pkexec` to get the root privileges needed to write to `sysfs`. If `pkexec`/polkit isn't installed, run it with `sudo` instead.
-
----
-
-## 🎮 Controls
-
-| Action | Description |
-|--------|-------------|
-| Color Buttons | Apply preset RGB colors |
-| Hue Bar + Grid | Pick any color from the full spectrum |
-| HEX Input | Apply any custom RGB color |
-| Brightness Select | Change keyboard brightness |
-| Fan Profile Select | Switch between Quiet / Balanced / Performance |
-| Ctrl + C | Exit the application |
-
----
-
-## 🧩 Supported Hardware
-
-### Keyboard RGB / brightness
-| Backend | Coverage | Requirements |
-|---|---|---|
-| ASUS (`asus-nb-wmi`) | ASUS TUF, ROG and most recent ASUS laptops | Built into the kernel driver |
-| OpenRGB | Acer Predator/Nitro (ITE8291), Clevo, MSI, and other OpenRGB-supported devices | `openrgb` CLI installed |
-| Generic LED class | Many Dell, HP, Lenovo and some Acer models | Brightness only, no color |
-
-### Fan / thermal profile
-Uses `/sys/firmware/acpi/platform_profile`, standardized across `asus-wmi`, `thinkpad_acpi`, `dell-laptop`, `ideapad-laptop` and others (kernel 5.20+). If your kernel/laptop doesn't expose it, the app shows "No fan profile interface detected" instead of a non-functional control.
-
-Tested on: **ASUS TUF Gaming F16 (FX607VU)**. Other models/vendors work as long as they expose one of the interfaces above.
-
----
-
-## 📦 Dependencies
-
-- Python
-- Textual (includes Rich)
-
-Install manually:
-```bash
-pip install textual
-```
-or
-```bash
-pip install -r requirements.txt
-```
-
----
-
-## ⚙️ Headless mode
+### Setup
 
 ```bash
-sudo python3 main.py --apply
+# Install dependencies
+pip install textual rich
+
+# Make executable
+chmod +x glow-control.py
+
+# Run (will prompt for sudo/root)
+python3 glow-control.py
 ```
-Applies the last saved color, brightness and fan profile without opening the UI — useful for an autostart entry that restores your settings right after login.
 
----
+### Optional: OpenRGB Support
 
-## 📅 Roadmap
+```bash
+# Install OpenRGB from your package manager
+sudo apt install openrgb  # Debian/Ubuntu
+sudo pacman -S openrgb    # Arch
 
-- [x] Preset colors
-- [x] Custom HEX colors
-- [x] Full HSV color picker
-- [x] Brightness control
-- [x] Fan/thermal profile control
-- [x] Configuration file (persists last settings)
-- [x] Multi-vendor hardware detection
-- [ ] RGB effects (breathing, color cycle)
-- [ ] Packaging (.deb / AUR)
+# Start OpenRGB daemon
+openrgb --startasdaemon
+```
 
----
+## Usage
 
-## 🤝 Contributing
+### Launch Application
 
-Pull requests, issues and suggestions are welcome.
+```bash
+sudo python3 glow-control.py
+```
 
----
+The app will auto-detect your hardware and use the best available backend.
 
-## 📄 License
+### Interface
 
-This project is licensed under the MIT License.
+The application has 4 tabs:
 
----
+#### Lighting Tab
+- Preset colors (16 built-in options)
+- Interactive color picker (hue + saturation/value grid)
+- Manual HEX color input
+- Brightness slider (Off, Low, Medium, Maximum)
 
-## 👨‍💻 Author
+#### Fan Control Tab
+- Real-time CPU temperature
+- Fan RPM display
+- Fan mode selection (if ACPI platform profile available)
 
-**Ali Dağdelen**
-GitHub: https://github.com/alidagdelen
+#### Settings Tab
+- Active backend information
+- Config file location
+- Reset to defaults button
+- Open config file button
+
+#### About Tab
+- Project information
+- GitHub link
+
+### Keyboard Shortcuts
+
+- `Ctrl+C` - Quit application
+
+## Configuration
+
+Settings are stored in `~/.config/glow-control/config.json`
+
+```json
+{
+  "color": "#FFFFFF",
+  "brightness": "3",
+  "fan_profile": ""
+}
+```
+
+Automatically updated when you change settings in the app. Can be edited manually between sessions.
+
+## Command Line Usage
+
+Apply saved settings without opening the UI:
+
+```bash
+sudo python3 glow-control.py --apply
+```
+
+Useful for startup scripts or automation.
+
+## Troubleshooting
+
+### "Backend: none detected"
+
+Your laptop model isn't detected. Check:
+- ASUS models: verify `/sys/devices/platform/asus-nb-wmi/` exists
+- OpenRGB: run `openrgb --list-devices` to verify
+- Generic LED: check `/sys/class/leds/` for backlight devices
+
+### Colors not changing
+
+- Ensure app is run with `sudo`
+- Check backend detection (Settings tab)
+- Verify your kernel supports the backlight interface
+- Try running with `--apply` to apply saved settings at boot
+
+### Permission denied errors
+
+Some systems require additional udev rules for non-root access. For now, running with sudo is the simplest solution.
+
+## License
+
+MIT (c) 2026
+
+Author: Dağdelen
+
+## Contributing
+
+Found an issue? Want to improve something? Open an issue or pull request on GitHub.
+
+## Acknowledgments
+
+- Textual framework for the TUI
+- OpenRGB project for cross-device RGB support
