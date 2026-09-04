@@ -26,7 +26,7 @@ Glow Control Center is a terminal-based application that provides unified contro
    - Full RGB support
    - Works on ASUS TUF, ROG, and recent ASUS models
    - No external dependencies
-
+![main](./screenshots/mainscreen.png)
 2. **OpenRGB**
    - Generic RGB support via OpenRGB daemon
    - Compatible with: Acer Predator/Nitro (ITE8291), Clevo, MSI, and more
