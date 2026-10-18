@@ -5,21 +5,6 @@ Glow Control Center
 RGB / backlit keyboard control center for Linux laptops.
 Runs via a Terminal User Interface (TUI).
 
-Automatically selects the most appropriate method to interact with hardware on startup:
-
-  1. ASUS     - `asus-nb-wmi` sysfs interface (full RGB support, no extra dependencies)
-  2. OpenRGB  - Acer Predator/Nitro (ITE8291), Clevo, MSI and dozens of similar
-                devices; requires `openrgb` CLI installed and daemon/udev rules ready
-  3. Generic  - Linux LED class keyboard backlight (Dell, HP, Lenovo, some
-                Acer models); brightness only, no color support
-
-If no suitable interface is found, the application still launches; color/brightness
-changes simply won't affect the hardware.
-
-Introduced in Version 2.0: effect engine (breathing / rainbow / favorite cycle),
-favorite colors, automatic brightness dimming based on battery status, hardware rescan,
-suppressing unnecessary sudo prompts, and command-line usage.
-
 Author: Dağdelen
 License: MIT (c) 2026
 """
@@ -44,15 +29,11 @@ from typing import Optional
 from rich.text import Text
 from textual import events
 from textual.app import App, ComposeResult
-from textual.containers import Grid, Vertical
+from textual.containers import Grid, Vertical, Horizontal
 from textual.message import Message
 from textual.reactive import reactive
 from textual.timer import Timer
-from textual.widgets import Button, Footer, Header, Input, Select, Static, TabbedContent, TabPane
-
-# --------------------------------------------------------------------------
-# Constants
-# --------------------------------------------------------------------------
+from textual.widgets import Button, Footer, Header, Input, Select, Static, TabbedContent, TabPane, Switch
 
 APP_VERSION = "2.0"
 FAN_REFRESH_INTERVAL = 2.0
@@ -62,7 +43,7 @@ MAX_FAVORITES = 8
 GITHUB_URL = "https://github.com/alidagdelen"
 
 EFFECT_SPEEDS = {"slow": 0.35, "normal": 0.18, "fast": 0.08}
-OPENRGB_MIN_INTERVAL = 0.5  # OpenRGB spawns a new process per tick, prevents rapid firing
+OPENRGB_MIN_INTERVAL = 0.5
 
 LOG = logging.getLogger("glow-control")
 
@@ -102,10 +83,6 @@ def save_config(data: dict) -> None:
         LOG.warning("Failed to save settings: %s", exc)
 
 
-# --------------------------------------------------------------------------
-# Keyboard Hardware Backends
-# --------------------------------------------------------------------------
-
 ASUS_KBD_ROOT = "/sys/devices/platform/asus-nb-wmi/leds/asus::kbd_backlight"
 
 
@@ -120,11 +97,9 @@ def _write_sysfs(path: str, value: str) -> bool:
 
 
 class KeyboardBackend(ABC):
-    """Common interface that every hardware backend must implement."""
-
     name: str = "Unknown"
     supports_rgb: bool = False
-    write_interval_floor: float = 0.0  # some layers require a rate limit (e.g., OpenRGB)
+    write_interval_floor: float = 0.0
 
     @abstractmethod
     def is_available(self) -> bool:
@@ -140,8 +115,6 @@ class KeyboardBackend(ABC):
 
 
 class AsusBackend(KeyboardBackend):
-    """Direct control using ASUS asus-nb-wmi driver (TUF, ROG, etc.)."""
-
     name = "ASUS (asus-nb-wmi)"
     supports_rgb = True
 
@@ -159,8 +132,6 @@ class AsusBackend(KeyboardBackend):
 
 
 class OpenRGBBackend(KeyboardBackend):
-    """General RGB support via OpenRGB CLI (ITE8291, Clevo, MSI, ...)."""
-
     name = "OpenRGB"
     supports_rgb = True
     write_interval_floor = OPENRGB_MIN_INTERVAL
@@ -201,8 +172,6 @@ class OpenRGBBackend(KeyboardBackend):
 
 
 class GenericLedBackend(KeyboardBackend):
-    """Fallback backend for devices with non-RGB, plain keyboard backlights."""
-
     name = "Generic LED (brightness only)"
     supports_rgb = False
 
@@ -255,22 +224,21 @@ def detect_backend() -> KeyboardBackend:
     return NullBackend()
 
 
-def has_unelevated_hardware_access() -> bool:
-    """Returns True if the user already has unprivileged write access to hardware
-    (e.g., via udev rules), preventing unnecessary sudo/pkexec prompts."""
-    checks: list[bool] = []
-    if os.path.isdir(ASUS_KBD_ROOT):
-        checks.append(os.access(f"{ASUS_KBD_ROOT}/kbd_rgb_mode", os.W_OK))
-    for path in glob.glob("/sys/class/leds/*kbd_backlight*/brightness"):
-        checks.append(os.access(path, os.W_OK))
-    if os.path.isfile(PLATFORM_PROFILE_PATH := "/sys/firmware/acpi/platform_profile"):
-        checks.append(os.access(PLATFORM_PROFILE_PATH, os.W_OK))
-    return bool(checks) and all(checks)
+def has_unelevated_hardware_access(backend: Optional[KeyboardBackend] = None) -> bool:
+    if backend is None:
+        backend = detect_backend()
+    if isinstance(backend, AsusBackend):
+        return (
+            os.path.isdir(ASUS_KBD_ROOT)
+            and os.access(f"{ASUS_KBD_ROOT}/kbd_rgb_mode", os.W_OK)
+            and os.access(f"{ASUS_KBD_ROOT}/brightness", os.W_OK)
+        )
+    if isinstance(backend, GenericLedBackend):
+        return bool(backend._path) and os.access(f"{backend._path}/brightness", os.W_OK)
+    if isinstance(backend, OpenRGBBackend):
+        return backend.is_available()
+    return False
 
-
-# --------------------------------------------------------------------------
-# Fan Control and Thermal Monitoring
-# --------------------------------------------------------------------------
 
 PLATFORM_PROFILE_PATH = "/sys/firmware/acpi/platform_profile"
 PLATFORM_PROFILE_CHOICES_PATH = "/sys/firmware/acpi/platform_profile_choices"
@@ -370,7 +338,6 @@ def read_fan_rpm() -> list[int]:
 
 
 def read_battery_status() -> Optional[tuple[str, int]]:
-    """Returns (status, percentage); None if no battery. E.g., ('Discharging', 62)."""
     for status_path in sorted(glob.glob("/sys/class/power_supply/BAT*/status")):
         base = os.path.dirname(status_path)
         try:
@@ -383,10 +350,6 @@ def read_battery_status() -> Optional[tuple[str, int]]:
             continue
     return None
 
-
-# --------------------------------------------------------------------------
-# Color Helpers and Widgets
-# --------------------------------------------------------------------------
 
 PRESET_COLORS: dict[str, tuple[str, tuple[int, int, int]]] = {
     "cyan": ("Cyan", (0, 255, 255)),
@@ -424,6 +387,16 @@ def rgb_to_hex(r: int, g: int, b: int) -> str:
 
 def _rgb_style(r: int, g: int, b: int) -> str:
     return f"on rgb({r},{g},{b})"
+
+
+def get_soft_bg_color(hex_code: str) -> str:
+    r, g, b = hex_to_rgb(hex_code)
+    base_r, base_g, base_b = 16, 20, 27
+    factor = 0.12
+    new_r = int(base_r + (r - base_r) * factor)
+    new_g = int(base_g + (g - base_g) * factor)
+    new_b = int(base_b + (b - base_b) * factor)
+    return f"rgb({new_r},{new_g},{new_b})"
 
 
 class HueBar(Static):
@@ -482,8 +455,6 @@ class SaturationValueGrid(Static):
 
 
 class FanDisplay(Static):
-    """Simple rotating indicator based on fan status."""
-
     rotation = reactive(0)
     spinning = reactive(True)
 
@@ -500,10 +471,6 @@ class FanDisplay(Static):
     def _rotate(self) -> None:
         self.rotation += 1
 
-
-# --------------------------------------------------------------------------
-# Main Application
-# --------------------------------------------------------------------------
 
 class GlowControlApp(App):
     TITLE = "Glow Control Center"
@@ -534,8 +501,36 @@ class GlowControlApp(App):
     #main-container {
         background: #10141b;
         border: solid #f5a524;
-        padding: 1 2;
+        padding: 0 1;
         height: 1fr;
+    }
+
+    #top-bar {
+        height: 4;
+        background: #161b22;
+        border-bottom: solid #33404f;
+        align: right middle;
+        padding: 0 1;
+        margin-bottom: 0;
+    }
+
+    #top-right-control {
+        width: 18;
+        height: 3;
+        align: center middle;
+    }
+
+    .top-label {
+        color: #f5a524;
+        text-style: bold;
+        text-align: center;
+        height: 1;
+    }
+
+    #admin-switch {
+        height: 1;
+        width: 8;
+        margin-left: 5;
     }
 
     #tabs {
@@ -543,62 +538,64 @@ class GlowControlApp(App):
     }
 
     TabPane {
-        padding: 1 3;
+        padding: 0 2;
+        overflow-y: auto;
     }
 
     .section-title {
         color: #f5a524;
         text-style: bold;
-        margin: 1 0;
+        margin: 1 0 0 0;
     }
 
     #preview {
-        height: 4;
+        height: 2;
         border: round #f5a524;
         text-align: center;
         text-style: bold;
         color: #101010;
-        margin-bottom: 1;
+        margin-top: 1;
+        margin-bottom: 0;
     }
 
     #backend-status, #backend-status-settings {
         color: #2dd4bf;
         text-style: italic;
-        margin-bottom: 1;
+        margin-bottom: 0;
     }
 
     #button-grid {
         grid-size: 4 4;
-        height: 14;
+        height: 8;
         border: solid #33404f;
-        padding: 1;
-        margin-bottom: 1;
+        padding: 0;
+        margin-bottom: 0;
     }
 
     #favorites-grid {
         grid-size: 4 2;
-        height: 7;
+        height: 5;
         border: solid #33404f;
-        padding: 1;
-        margin-bottom: 1;
+        padding: 0;
+        margin-bottom: 0;
     }
 
     #favorites-empty {
         color: #6b7686;
         text-style: italic;
-        margin-bottom: 1;
+        margin-bottom: 0;
     }
 
     #hue-bar {
-        height: 3;
+        height: 2;
         border: solid #33404f;
-        margin-bottom: 1;
+        margin-bottom: 0;
     }
 
     #sv-grid {
-        height: 10;
+        height: 6;
         border: solid #33404f;
-        margin-bottom: 1;
+        margin-bottom: 0;
     }
 
     Button {
@@ -606,6 +603,7 @@ class GlowControlApp(App):
         color: #e6ecf3;
         border: none;
         margin: 0 1;
+        height: 1;
     }
 
     Button:hover {
@@ -627,12 +625,14 @@ class GlowControlApp(App):
         border: solid #33404f;
         background: #10141b;
         color: #e6ecf3;
-        margin-bottom: 1;
+        height: 3;
+        margin-bottom: 0;
     }
 
     Select {
         border: solid #33404f;
-        margin-bottom: 1;
+        height: 3;
+        margin-bottom: 0;
     }
 
     #fan-status {
@@ -640,18 +640,18 @@ class GlowControlApp(App):
         text-style: italic;
         border-left: solid #2dd4bf;
         padding-left: 1;
-        margin-bottom: 1;
+        margin-bottom: 0;
     }
 
     #battery-status {
         color: #94a3b8;
         border-left: solid #33404f;
         padding-left: 1;
-        margin-bottom: 1;
+        margin-bottom: 0;
     }
 
     #fan-display {
-        height: 3;
+        height: 2;
         border: solid #2dd4bf;
         text-align: center;
         color: #2dd4bf;
@@ -660,23 +660,23 @@ class GlowControlApp(App):
 
     #effect-buttons {
         grid-size: 4 1;
-        height: 4;
-        margin-bottom: 1;
+        height: 3;
+        margin-bottom: 0;
     }
 
     #about-info {
         border: solid #33404f;
-        padding: 1 2;
+        padding: 1;
         color: #e6ecf3;
         height: auto;
-        margin-bottom: 1;
+        margin-bottom: 0;
     }
 
     #about-logo {
         color: #f5a524;
         text-style: bold;
         text-align: center;
-        margin-bottom: 1;
+        margin-bottom: 0;
     }
 
     Footer {
@@ -694,14 +694,18 @@ class GlowControlApp(App):
         self._effect_timer: Optional[Timer] = None
         self._effect_tick = 0.0
         self._effect_favorite_index = 0
-
-    # -- UI Setup -------------------------------------------------
+        self._switching_privilege = False
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
 
         with Vertical(id="main-container") as container:
             container.border_title = " Glow Control "
+
+            with Horizontal(id="top-bar"):
+                with Vertical(id="top-right-control"):
+                    yield Static("🔐 Root İzni", classes="top-label")
+                    yield Switch(value=os.geteuid() == 0, id="admin-switch")
 
             with TabbedContent(id="tabs"):
                 with TabPane("Lighting", id="lighting-tab"):
@@ -803,8 +807,6 @@ class GlowControlApp(App):
                         "RGB and backlit keyboard control center for Linux laptops. "
                         "Written for ASUS, now also works on OpenRGB-supported "
                         "devices and plain LED backlights.\n\n"
-                        "New in this version: light effects, favorite colors, automatic "
-                        "brightness dimming on battery, and hardware rescan.\n\n"
                         "Author: Dağdelen\n"
                         "License: MIT (c) 2026",
                         id="about-info",
@@ -830,8 +832,6 @@ class GlowControlApp(App):
             )
             yield Button("★ Add Current Color", id="add-favorite")
 
-    # -- Lifecycle ------------------------------------------------
-
     def on_mount(self) -> None:
         r, g, b = hex_to_rgb(self.config_data["color"])
         self.color_hex = self.config_data["color"]
@@ -847,8 +847,6 @@ class GlowControlApp(App):
         saved_effect = self.config_data.get("effect", "off")
         if saved_effect != "off" and self.backend.supports_rgb:
             self._start_effect(saved_effect)
-
-    # -- Status Texts --------------------------------------------------
 
     def _backend_status_text(self) -> str:
         if isinstance(self.backend, NullBackend):
@@ -899,15 +897,16 @@ class GlowControlApp(App):
             self.backend.set_brightness(1)
             self.notify("Battery mode: keyboard brightness dimmed", timeout=3)
 
-    # -- Color / Brightness --------------------------------------------------
-
     def watch_color_hex(self, new_color: str) -> None:
         try:
             preview = self.query_one("#preview", Static)
             preview.styles.background = new_color
             preview.update(f"ACTIVE COLOR: {new_color}")
+
+            container = self.query_one("#main-container", Vertical)
+            container.styles.background = get_soft_bg_color(new_color)
         except Exception:
-            LOG.debug("Preview widget not ready yet", exc_info=True)
+            LOG.debug("Preview widget or container not ready yet", exc_info=True)
 
     def apply_system_color(self, r: int, g: int, b: int, persist: bool = True) -> None:
         if self.backend.supports_rgb:
@@ -917,13 +916,10 @@ class GlowControlApp(App):
             save_config(self.config_data)
 
     def _pick_color(self, r: int, g: int, b: int) -> None:
-        """Called when user manually picks a color: stops the active effect."""
         if self.active_effect != "off":
             self._stop_effect()
         self.color_hex = rgb_to_hex(r, g, b)
         self.apply_system_color(r, g, b)
-
-    # -- Effect Engine --------------------------------------------------
 
     def _start_effect(self, effect: str) -> None:
         self._stop_effect(persist=False)
@@ -972,7 +968,7 @@ class GlowControlApp(App):
         base_r, base_g, base_b = hex_to_rgb(self.color_hex)
 
         if self.active_effect == "breathing":
-            phase = (math.sin(self._effect_tick * 0.25) + 1) / 2  # 0..1
+            phase = (math.sin(self._effect_tick * 0.25) + 1) / 2
             level = 0.15 + phase * 0.85
             r, g, b = (int(base_r * level), int(base_g * level), int(base_b * level))
             self.backend.set_color(r, g, b)
@@ -986,12 +982,10 @@ class GlowControlApp(App):
             favorites = self.config_data.get("favorites") or list(
                 f"#{r:02X}{g:02X}{b:02X}" for _, (_, (r, g, b)) in list(PRESET_COLORS.items())[:4]
             )
-            if self._effect_tick % 20 == 0:
+            if int(self._effect_tick) % 20 == 0:
                 self._effect_favorite_index = (self._effect_favorite_index + 1) % len(favorites)
             r, g, b = hex_to_rgb(favorites[self._effect_favorite_index])
             self.backend.set_color(r, g, b)
-
-    # -- Favorites --------------------------------------------------------
 
     def _rebuild_favorites_row(self) -> None:
         try:
@@ -1030,8 +1024,6 @@ class GlowControlApp(App):
         self._rebuild_favorites_row()
         self.notify("Favorites cleared")
 
-    # -- Hardware Rescan --------------------------------------------
-
     def action_rescan(self) -> None:
         self._stop_effect(persist=False)
         self.backend = detect_backend()
@@ -1050,7 +1042,35 @@ class GlowControlApp(App):
         save_config(self.config_data)
         self.notify("Settings saved")
 
-    # -- Event Handlers --------------------------------------------------
+    def on_switch_changed(self, event: Switch.Changed) -> None:
+        if event.switch.id == "admin-switch":
+            if self._switching_privilege:
+                return
+
+            if event.value and os.geteuid() != 0:
+                self.notify("Grafiksel şifre penceresi açılıyor...", timeout=4)
+                script_path = os.path.abspath(__file__)
+                success = False
+                for cmd_prefix in (["pkexec"], ["sudo"]):
+                    cmd = [*cmd_prefix, sys.executable, script_path, *sys.argv[1:]]
+                    try:
+                        result = subprocess.run(cmd)
+                        if result.returncode == 0:
+                            success = True
+                            break
+                    except (subprocess.CalledProcessError, FileNotFoundError):
+                        continue
+                
+                if success:
+                    self.exit()
+                else:
+                    self._switching_privilege = True
+                    event.switch.value = False
+                    self._switching_privilege = False
+                    self.notify("Yetkilendirme iptal edildi veya başarısız oldu.", severity="error")
+
+            elif not event.value and os.geteuid() == 0:
+                self.notify("Root modundan çıkmak için uygulamayı normal kullanıcı ile yeniden başlatın.", severity="information")
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         button_id = event.button.id
@@ -1154,31 +1174,10 @@ class GlowControlApp(App):
             self.config_data["effect_speed"] = str(event.value)
             save_config(self.config_data)
             if self.active_effect != "off":
-                self._start_effect(self.active_effect)  # restart with new speed
-
-
-# --------------------------------------------------------------------------
-# CLI / Entry Point
-# --------------------------------------------------------------------------
-
-def _relaunch_with_privileges(extra_args: list[str]) -> None:
-    print("[*] Administrator privileges required to control keyboard backlight.")
-    print("[*] Requesting authentication via pkexec / sudo...")
-    script_path = os.path.abspath(__file__)
-
-    for cmd_prefix in (["pkexec"], ["sudo"]):
-        cmd = [*cmd_prefix, sys.executable, script_path, *extra_args]
-        try:
-            subprocess.run(cmd, check=True)
-            return
-        except (subprocess.CalledProcessError, FileNotFoundError):
-            continue
-
-    print("[-] Authentication failed or was cancelled.")
+                self._start_effect(self.active_effect)
 
 
 def apply_saved_settings() -> None:
-    """Applies saved settings to hardware without opening the UI (--apply)."""
     config_data = load_config()
     keyboard = detect_backend()
     fan = detect_fan_backend()
@@ -1257,10 +1256,6 @@ def main() -> None:
         return
 
     no_elevate = args.no_elevate or os.environ.get("GLOW_CONTROL_NO_ELEVATE") == "1"
-    if os.geteuid() != 0 and not no_elevate and not has_unelevated_hardware_access():
-        _relaunch_with_privileges(sys.argv[1:])
-        sys.exit(0)
-
     GlowControlApp(no_elevate=no_elevate).run()
 
 
