@@ -718,7 +718,7 @@ class GlowControlApp(App):
                             yield Button(name, id=f"preset-{key}")
 
                     yield Static("Favorites", classes="section-title")
-                    yield from self._build_favorites_row()
+                    yield from self._build_favorites_container()
 
                     yield Static("Custom Color Picker", classes="section-title")
                     yield HueBar(id="hue-bar")
@@ -815,12 +815,11 @@ class GlowControlApp(App):
 
         yield Footer()
 
-    def _build_favorites_row(self) -> ComposeResult:
+    def _build_favorites_container(self) -> ComposeResult:
         favorites = self.config_data.get("favorites", [])
         if favorites:
             with Grid(id="favorites-grid"):
                 for hex_code in favorites:
-                    r, g, b = hex_to_rgb(hex_code)
                     yield Button(hex_code, id=f"favorite-{hex_code.lstrip('#')}")
                 yield Button("★ Add", id="add-favorite")
                 if len(favorites) > 1:
@@ -989,22 +988,27 @@ class GlowControlApp(App):
 
     def _rebuild_favorites_row(self) -> None:
         try:
-            old = self.query_one("#favorites-grid")
-            parent = old.parent
-            old.remove()
+            for widget in self.query("#favorites-grid, #favorites-empty, #add-favorite, #clear-favorites"):
+                widget.remove()
         except Exception:
-            try:
-                old = self.query_one("#favorites-empty")
-                parent = old.parent
-                old.remove()
-                try:
-                    self.query_one("#add-favorite").remove()
-                except Exception:
-                    pass
-            except Exception:
-                return
-        for widget in self._build_favorites_row():
-            parent.mount(widget)
+            pass
+
+        try:
+            parent = self.query_one("#lighting-tab")
+            favorites = self.config_data.get("favorites", [])
+            if favorites:
+                grid = Grid(id="favorites-grid")
+                parent.mount(grid)
+                for hex_code in favorites:
+                    grid.mount(Button(hex_code, id=f"favorite-{hex_code.lstrip('#')}"))
+                grid.mount(Button("★ Add", id="add-favorite"))
+                if len(favorites) > 1:
+                    grid.mount(Button("Clear", id="clear-favorites"))
+            else:
+                parent.mount(Static("No favorites yet — pick a color and save it with '★ Add'.", id="favorites-empty"))
+                parent.mount(Button("★ Add Current Color", id="add-favorite"))
+        except Exception as exc:
+            LOG.warning("Failed to rebuild favorites: %s", exc)
 
     def _add_current_to_favorites(self) -> None:
         favorites: list[str] = self.config_data.setdefault("favorites", [])
